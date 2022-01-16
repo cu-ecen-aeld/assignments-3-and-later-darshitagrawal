@@ -22,6 +22,7 @@ mkdir -p "$(dirname "$WRITEFILE")"
 if [ $? -eq 0 ]
 then
 	touch "$WRITEFILE"
+	
 	#Checking if file successfully created.
 	if [ $? -eq 0 ]
 	then 
