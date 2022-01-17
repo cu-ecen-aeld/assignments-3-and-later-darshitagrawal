@@ -20,7 +20,7 @@ FILESDIR=$1
 SEARCHSTR=$2
 
 #Check if the file directory exists.
-if [[ ! -d $FILESDIR ]]
+if [ ! -d $FILESDIR ]
 then
   echo "The entered directory does not represent a directory on the filesystem."
   exit 1 
