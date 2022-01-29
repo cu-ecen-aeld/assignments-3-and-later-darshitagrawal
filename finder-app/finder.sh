@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 #Assignment-1 - finder.sh
 #Author: Darshit Nareshkumar Agrawal
 #Accepts two arguments. The first argument is a path to the directory on the filesystem and the second argument is a text string which will be searched within these files.
