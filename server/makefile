@@ -1,19 +1,25 @@
-CROSS_COMPILE = 
-CC = $(CROSS_COMPILE)gcc
+ifeq ($(CC),)
+	CC= $(CROSS_COMPILE)gcc
+endif
 
-CFLAGS = -g -Wall -Werror
+ifeq ($(CFLAGS),)
+	CFLAGS= -g -Wall -Werror -pthread
+endif
 
-default: aesdsocket
+ifeq ($(LDFLAGS),)
+	LDFLAGS = -pthread -lrt	
+endif
 
-all: aesdsocket
+TARGET=aesdsocket
 
-aesdsocket: aesdsocket.o
-	$(CC) $< -o $@
-	
-aesdsocket.o: aesdsocket.c
-	$(CC) $(CFLAGS) -c $< -o $@
-	
-clean: 
-	rm -f aesdsocket aesdsocket.o
+SRCS= aesdsocket.c
 
-.PHONY: clean
+default: ${TARGET}
+
+all: ${TARGET}
+
+$(TARGET): $(SRCS) 
+	$(CC) $(CFLAGS) $^ -o $@ $(INCLUDES) $(LDFLAGS)
+
+clean:
+	rm -f *.o $(TARGET) *.elf *.map
