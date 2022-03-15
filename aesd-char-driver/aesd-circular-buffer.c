@@ -10,8 +10,10 @@
 
 #ifdef __KERNEL__
 #include <linux/string.h>
+#include <linux/slab.h>
 #else
 #include <string.h>
+#include <stdlib.h>
 #endif
 
 #include "aesd-circular-buffer.h"
@@ -44,8 +46,9 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
     size_t size = buffer->entry[buffer->out_offs].size;
     uint8_t copy_out_offs = buffer->out_offs;
     size_t temp_size = 0;
+    int count = 0;
     
-    for(int count = 0; count < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED; count++)
+    for(count = 0; count < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED; count++)
     {
         if(char_offset > size - 1)
         {
@@ -81,7 +84,7 @@ const char* aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, 
 {
     const char* retval = NULL;
     /*Check for valid input parameters*/
-    if((buffer == NULL) || (add_entry == NULL) || (add_entry.size == 0) || (add_entry.buffptr == NULL))
+    if((buffer == NULL) || (add_entry == NULL) || (add_entry->size == 0) || (add_entry->buffptr == NULL))
     {
         return retval;
     }
@@ -130,14 +133,15 @@ void aesd_circular_buffer_free(struct aesd_circular_buffer *buffer)
     struct aesd_buffer_entry *buffer_entry;
     uint8_t index;
 
-    AESD_CIRCULAR_BUFFER_FOREACH(entry,buf,index) 
+    AESD_CIRCULAR_BUFFER_FOREACH(buffer_entry, buf, index) 
     {
-        if(entry->buffptr != NULL)
+        if(buffer_entry->buffptr != NULL)
         {
             #ifdef __KERNEL__
-            kfree((void*)entry->buffptr);
+            kfree((void*)buffer_entry->buffptr);
             #else
-            free((void*)entry->buffptr);            
+            free((void*)buffer_entry->buffptr);  
+            #endif          
         }     
     }
 }

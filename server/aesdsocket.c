@@ -30,8 +30,14 @@
 #include <fcntl.h>
 #include <poll.h>
 
+#define USE_AESD_CHAR_DEVICE	(1)
 #define BACKLOG 5
 #define PORT_NUM "9000"
+#if (USE_AESD_CHAR_DEVICE == 1)
+	#define PATH "/dev/aesdchar"
+#else
+	#define PATH "/var/tmp/aesdsocketdata"
+#endif
 
 int cfd;
 int sfd = -1;
@@ -58,15 +64,6 @@ typedef struct slist_data_s slist_data_t;
 
 void graceful_exit()
 {
-    if(cfd > -1)
-    {
-        shutdown(cfd, SHUT_RDWR);
-        close(cfd);
-    }
-    if(result != NULL)
-    {
-        freeaddrinfo(result);
-    }
     if(sfd > -1)
     {
         shutdown(sfd, SHUT_RDWR);
@@ -100,16 +97,24 @@ static void signal_handler(int signal)
 void* start_routine(void* thread_params)
 {
     int lock_status, fd, bytes_read, bytes_write;
-    char buf[1024];
-
+    int offset = 0;
+    uint32_t counter = 1; 
+    int current_offset = 0;
     struct thread_data* params = (struct thread_data*)thread_params;
-    
-    while(1)
+    char* buf = (char*)calloc(sizeof(char), 1024);
+    if(buf == NULL)
     {
-        bytes_read = read(params->cfd, buf, (1024));
-        if (bytes_read < 0) 
+        syslog(LOG_USER | LOG_ERR, "Error in allocating memory to the buffer.");
+        params->thread_completion = true; 
+    }
+
+    while(params->thread_completion == false)
+    {
+        bytes_read = read(params->cfd, buf + current_offset, 1024);
+        if (bytes_read == -1) 
         {
             syslog(LOG_USER | LOG_ERR, "Error in reading from the socket. Error: %s", strerror(errno));
+            free(buf);
             params->thread_completion = true;
             pthread_exit(NULL);
         }
@@ -119,105 +124,148 @@ void* start_routine(void* thread_params)
             continue;
         }
 
+        current_offset += bytes_read;
+
         if (strchr(buf, '\n')) 
         {
            break;
         } 
+        counter++;
+        buf = (char*)realloc(buf, (counter * 1024));
+        if(buf == NULL)
+        {
+            syslog(LOG_USER | LOG_ERR, "Error in resizing the allocated memory.");
+            free(buf);
+            params->thread_completion = true;
+            pthread_exit(NULL);
+        }
     }
 
-    fd = open("/var/tmp/aesdsocketdata",O_RDWR | O_APPEND, 0766);
+    fd = open(PATH, O_RDWR | O_APPEND, 0766);
     if (fd == -1)
     {
         syslog(LOG_USER | LOG_ERR, "Error in opening the file. Error: %s", strerror(errno));
     }
 
     lseek(fd, 0, SEEK_END);
-    
+
     lock_status = pthread_mutex_lock(params->mutex);
     if(lock_status)
     {
         syslog(LOG_USER | LOG_ERR, "Error in locking the mutex. Error: %s", strerror(lock_status));
+        free(buf);
         params->thread_completion = true;
         pthread_exit(NULL);
     }
 
-    bytes_write = write(fd, buf, bytes_read);
+    bytes_write = write(fd, buf, current_offset);
     if(bytes_write == -1)
     {
         syslog(LOG_USER | LOG_ERR, "Error in writing to the file. Error: %s", strerror(errno));
+        free(buf); 
         params->thread_completion = true;
         close(fd);
         pthread_exit(NULL);
     }
 
-    lseek(fd, 0, SEEK_SET);
+    lseek(fd, 0, SEEK_SET); 
 
     lock_status = pthread_mutex_unlock(params->mutex);
     if(lock_status)
     {
         syslog(LOG_USER | LOG_ERR, "Error in unlocking the mutex. Error: %s", strerror(lock_status));
+        free(buf);
         params->thread_completion = true;
         pthread_exit(NULL);
     }
-
     close(fd);
-    memset(buf,0, 1024);
-    int offset = 0;
 
+    int fd2 = open(PATH, O_RDWR | O_APPEND, 0766);
+    if(fd2 == -1)
+    {
+        syslog(LOG_USER | LOG_ERR, "Error in opening the file. Error: %s", strerror(errno));
+        free(buf);
+        params->thread_completion = true;
+        pthread_exit(NULL);    
+    }
+
+    lseek(fd2, offset, SEEK_SET);
+
+    char* temp_buf = (char*)calloc(sizeof(char), 1024);
+    current_offset = 0;
+    counter = 1; 
     while(1) 
     {
-        fd = open("/var/tmp/aesdsocketdata", O_RDWR | O_APPEND, 0766);
-        if(fd < 0)
-        {
-            syslog(LOG_USER | LOG_ERR, "Error in opening the file. Error: %s", strerror(errno));
-            continue; 
-        }
-
-        lseek(fd, offset, SEEK_SET);
-
         lock_status = pthread_mutex_lock(params->mutex);
         if(lock_status)
         {
             syslog(LOG_USER | LOG_ERR, "Error in locking the mutex. Error: %s", strerror(errno));
+            free(buf);
             params->thread_completion = true;
             pthread_exit(NULL);
         }
-        
-        bytes_read = read(fd, buf, 1024);
 
-        lock_status = pthread_mutex_unlock(params->mutex);   
+        bytes_read = read(fd2, &temp_buf[current_offset], 1);
+        lock_status = pthread_mutex_unlock(params->mutex);  
+         
         if(lock_status)
         {
             syslog(LOG_USER | LOG_ERR, "Error in unlocking the mutex. Error: %s", strerror(lock_status));
+            free(buf);
+            free(temp_buf);
             params->thread_completion = true;
             pthread_exit(NULL);
         }
-        
-        close(fd);
+
         if(bytes_read == -1)
         {
             syslog(LOG_USER | LOG_ERR, "Error in reading from the file. Error: %s", strerror(errno));
-            continue;
+            break;
         }
-
         if(bytes_read == 0)
         {
             break;
         }
 
-        bytes_write = write(params->cfd, buf, bytes_read);
-
-        if(bytes_write == -1)
+        if(temp_buf[current_offset] == '\n')
         {
-            syslog(LOG_USER | LOG_ERR, "Error in writing to the file. Error: %s", strerror(errno));
-            continue;
+            bytes_write = write(params->cfd, temp_buf, current_offset + 1 );
+
+            if(bytes_write == -1)
+            {
+                syslog(LOG_USER | LOG_ERR, "Error in writing to the file. Error: %s", strerror(errno));
+                break;
+            }
+            memset(temp_buf, 0, (current_offset + 1));
+            current_offset = 0;
+        } 
+        else 
+        {
+            current_offset++;
+            if(current_offset > sizeof(temp_buf))
+            {
+                counter++;
+                temp_buf = realloc(temp_buf, counter * 1024);
+                if(temp_buf == NULL)
+                {
+                    syslog(LOG_USER | LOG_ERR, "Error in reallocating buffer.");
+                    free(temp_buf);
+                    free(buf);
+                    params->thread_completion = true; //exit
+                    pthread_exit(NULL);
+                }
+            }   
         }
-        offset += bytes_write;
     }
+    
+    close(fd2);
+    free(temp_buf);
+    free(buf);
     params->thread_completion = true;
     pthread_exit(NULL);
 }
 
+#if (USE_AESD_CHAR_DEVICE == 0)
 void *timer_routine(void *args)
 {
   struct tm *localTime;
@@ -285,6 +333,7 @@ void *timer_routine(void *args)
   }
   pthread_exit(NULL);
 }
+#endif
 
 int main(int argc, char **argv) 
 {
@@ -329,7 +378,7 @@ int main(int argc, char **argv)
         }
     }
     
-    int fd = creat("/var/tmp/aesdsocketdata", 0766);
+    int fd = open(PATH, O_CREAT | O_RDWR | O_TRUNC, 0666);
     if(fd == -1)
     {
         syslog(LOG_USER | LOG_ERR, "Error in creating the file. Error: %s", strerror(errno));
@@ -377,7 +426,7 @@ int main(int argc, char **argv)
         return -1;
     }
     
-    //freeaddrinfo(result);
+    freeaddrinfo(result);
 
     if(listen(sfd, BACKLOG) == -1) 
     {
@@ -385,7 +434,7 @@ int main(int argc, char **argv)
         graceful_exit();
         return -1;
     }
-
+    
     if(daemonize == true) 
     {
         int daemon_result = daemon(0,0);
@@ -397,8 +446,10 @@ int main(int argc, char **argv)
         }
     }
     
+#if (USE_AESD_CHAR_DEVICE == 0)
     pthread_t tid; 
     pthread_create(&tid, NULL, timer_routine, NULL);
+#endif
 
     while(signal_indication == false) 
     {
@@ -442,7 +493,9 @@ int main(int argc, char **argv)
         }
     }
 
+#if (USE_AESD_CHAR_DEVICE == 0)
     pthread_join(tid, NULL);
+#endif
 
     while (!SLIST_EMPTY(&head)) 
     {
@@ -453,10 +506,10 @@ int main(int argc, char **argv)
         thread_node = NULL;
     }
 
-    unlink("/var/tmp/aesdsocketdata");
-    if (access("/var/tmp/aesdsocketdata", F_OK) == 0)  
+    unlink(PATH);
+    if (access(PATH, F_OK) == 0)  
     {
-       remove("/var/tmp/aesdsocketdata");
+       remove(PATH);
     }
     graceful_exit();
 
