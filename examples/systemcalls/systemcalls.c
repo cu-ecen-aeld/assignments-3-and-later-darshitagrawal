@@ -1,3 +1,26 @@
+/**
+ * Filename: systemcalls.c
+ * Author: Darshit Nareshkumar Agrawal
+ * Compiler: gcc
+ * Date: 01/26/2022
+ * References: 1) https://stackoverflow.com/questions/14543443/in-c-how-do-you-redirect-stdin-stdout-stderr-to-files-when-making-an-execvp-or
+ 		2) Linux Programming Interface by Michael Kerrisk
+ 		3) Linux System Programming by Robert Love.
+ 		
+ */
+ 
+#include <stdio.h>													/*Header Files*/
+#include <stdlib.h>
+#include <stdbool.h>
+#include <stdarg.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <syslog.h>
+#include <errno.h>
+#include <unistd.h>
 #include "systemcalls.h"
 
 /**
@@ -9,6 +32,32 @@
 */
 bool do_system(const char *cmd)
 {
+    openlog(NULL, 0, LOG_USER);
+    int system_return;
+    system_return = system(cmd);
+    if(cmd == NULL)													/*Check the return value for cmd == NULL*/						
+    {
+        if(system_return == 0)
+	{
+	    syslog(LOG_USER | LOG_ERR, "\nNo shell is available.");
+	    return false;
+	}
+	else if(system_return != 0)
+	{
+	    syslog(LOG_USER | LOG_ERR, "\nShell is available.");
+	    return false;
+	}
+    }
+    if(system_return == -1)												/*Error*/
+    {
+        syslog(LOG_USER | LOG_ERR, "Child process could not be created or its termination process could not be retrieved. Error: %s",strerror(errno));
+	return false;
+    }
+    if(system_return > 0)												/*Error*/
+    {
+        syslog(LOG_USER | LOG_ERR, "Call has returned non-zero value.");
+	return false;
+    }
 
 /*
  * TODO  add your code here
@@ -45,9 +94,58 @@ bool do_exec(int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
+    
+    openlog(NULL, 0, LOG_USER);
+    
+    pid_t pid, result_wait;
+    int status;
+    pid = fork();
+    if(pid == -1)														/*Error*/
+    {
+        syslog(LOG_USER | LOG_ERR, "Child process is not created. Error: %s",strerror(errno));
+        return false;
+    }
+    if(!pid)															/*Running execv() under child process*/
+    {
+    	execv(command[0], command);
+    	exit(EXIT_FAILURE);
+    }
+    
+    result_wait = waitpid(pid, &status, 0);
+    if(result_wait == -1)													/*Error*/
+    {
+        syslog(LOG_USER | LOG_ERR, "Error in waiting for the termiantion process. Error: %s", strerror(errno));
+        return false;
+    }
+    
+    if(WIFEXITED(status))													/*Checking if child process terminated normally*/
+    {
+        syslog(LOG_USER | LOG_DEBUG, "Child exited, status: %d", WEXITSTATUS(status));
+        if(WEXITSTATUS(status) != 0)
+        {
+            return false;
+        }
+    }
+    else if(WIFSIGNALED(status))												/*Checking if the child process was terminated by the signal*/
+    {
+        syslog(LOG_USER | LOG_DEBUG, "Child killed by signal %d (%s)", WTERMSIG(status), strsignal(WTERMSIG(status)));
+    }
+#ifdef WCOREDUMP
+    if(WCOREDUMP(status))													/*Checking if the child process produced a core-dump*/
+    {
+        syslog(LOG_USER | LOG_DEBUG, "Core Dumped.");
+    }
+#endif
+    else if(WIFSTOPPED(status))												/*Checking if the child process was stopped by a signal*/
+    {
+        syslog(LOG_USER | LOG_DEBUG, "Child stopped by signal %d (%s)", WSTOPSIG(status), strsignal(WSTOPSIG(status)));
+    }
+#ifdef WIFCONTINUED
+    if(WIFCONTINUED(status))													/*Checking if the child process was resumed by a signal*/
+    {
+        syslog(LOG_USER | LOG_DEBUG, "Child continued.");
+    }
+#endif
 
 /*
  * TODO:
@@ -80,11 +178,75 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
+    
+    openlog(NULL, 0, LOG_USER);
+    int fd, result_dup, status;
+    pid_t pid, result_wait;
+    fd = open(outputfile, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+    if(fd == -1)												
+    {
+        syslog(LOG_USER | LOG_ERR, "File cannot be opened. Error: %s", strerror(errno));
+        return false;
+    }
+    pid = fork();
+    if(pid == -1)
+    {
+        syslog(LOG_USER | LOG_ERR, "Child process is not created. Error: %s",strerror(errno));
+        return false;
+    }
+    else if(!pid)
+    {
+        result_dup = dup2(fd, STDOUT_FILENO);												/*Redirecting stdout to current file descriptor*/
+        if(result_dup == -1)
+        {
+            syslog(LOG_USER | LOG_ERR, "File duplication failed.");
+            return false;
+        }
+        close(fd);															/*Closing the file descriptor before execv()*/
+        execv(command[0], command);
+        exit(EXIT_FAILURE);
+    }
+    
+    close(fd);
+    result_wait = waitpid(pid, &status, 0);
+    if(result_wait == -1)									
+    {
+        syslog(LOG_USER | LOG_ERR, "Error in waiting for the termiantion process. Error: %s", strerror(errno));
+        return false;
+    }
+    
+    if(WIFEXITED(status))
+    {
+        syslog(LOG_USER | LOG_DEBUG, "Child exited, status: %d", WEXITSTATUS(status));
+        if(WEXITSTATUS(status) != 0)
+        {
+            return false;
+        }
+    }
+    else if(WIFSIGNALED(status))
+    {
+        syslog(LOG_USER | LOG_DEBUG, "Child killed by signal %d (%s)", WTERMSIG(status), strsignal(WTERMSIG(status)));
+    }
+#ifdef WCOREDUMP
+    if(WCOREDUMP(status))
+    {
+        syslog(LOG_USER | LOG_DEBUG, "Core Dumped.");
+    }
+#endif
+    else if(WIFSTOPPED(status))
+    {
+        syslog(LOG_USER | LOG_DEBUG, "Child stopped by signal %d (%s)", WSTOPSIG(status), strsignal(WSTOPSIG(status)));
+    }
+#ifdef WIFCONTINUED
+    if(WIFCONTINUED(status))
+    {
+        syslog(LOG_USER | LOG_DEBUG, "Child continued.");
+    }
+#endif
 
-
+       
+    
+    
 /*
  * TODO
  *   Call execv, but first using https://stackoverflow.com/a/13784315/1446624 as a refernce,
